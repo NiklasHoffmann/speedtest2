@@ -22,6 +22,8 @@ INTERVAL = 600  # 10 Minuten
 # Speichert die Messwerte für Durchschnittsberechnung
 hourly_results = []
 daily_results = []
+last_hour_logged = None
+last_day_logged = None
 
 def get_log_files():
     """Gibt die Dateipfade für das aktuelle Tageslog (Text und CSV) zurück"""
@@ -71,14 +73,19 @@ def calculate_average(results):
 
 def log_averages():
     """Speichert den stündlichen und täglichen Durchschnitt in die Datei"""
-    global hourly_results, daily_results
+    global hourly_results, daily_results, last_hour_logged, last_day_logged
 
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     text_log, _ = get_log_files()
+    
+    current_hour = datetime.now().hour
+    current_day = datetime.now().day
 
-    if hourly_results:
+    # Stündlicher Durchschnitt loggen
+    if hourly_results and (last_hour_logged is None or last_hour_logged != current_hour):
         avg_hourly_download, avg_hourly_upload, avg_hourly_ping, avg_hourly_loss = calculate_average(hourly_results)
-        hourly_results.clear()  # Zurücksetzen der Liste nach Berechnung
+        hourly_results.clear()
+        last_hour_logged = current_hour
 
         hourly_log = (
             f"{timestamp} | 📊 STÜNDLICHER DURCHSCHNITT | "
@@ -90,45 +97,42 @@ def log_averages():
             file.write(hourly_log)
         print(hourly_log.strip())
 
-    if daily_results and datetime.now().hour == 23 and datetime.now().minute >= 55:  # Um 23:55 Uhr berechnen
-        avg_daily_download, avg_daily_upload, avg_daily_ping, avg_daily_loss = calculate_average(daily_results)
-        daily_results.clear()
+    # Täglicher Durchschnitt um Mitternacht loggen
+    if daily_results and (last_day_logged is None or last_day_logged != current_day):
+        if current_hour == 0:
+            avg_daily_download, avg_daily_upload, avg_daily_ping, avg_daily_loss = calculate_average(daily_results)
+            daily_results.clear()
+            last_day_logged = current_day
 
-        daily_log = (
-            f"{timestamp} | 📈 TÄGLICHER DURCHSCHNITT | "
-            f"Download: {avg_daily_download:.2f} Mbit/s | Upload: {avg_daily_upload:.2f} Mbit/s | "
-            f"Ping: {avg_daily_ping:.2f} ms | Paketverlust: {avg_daily_loss:.2f}%\n"
-        )
+            daily_log = (
+                f"{timestamp} | 📈 TÄGLICHER DURCHSCHNITT | "
+                f"Download: {avg_daily_download:.2f} Mbit/s | Upload: {avg_daily_upload:.2f} Mbit/s | "
+                f"Ping: {avg_daily_ping:.2f} ms | Paketverlust: {avg_daily_loss:.2f}%\n"
+            )
 
-        with open(text_log, "a", encoding="utf-8", errors="ignore") as file:
-            file.write(daily_log)
-        print(daily_log.strip())
+            with open(text_log, "a", encoding="utf-8", errors="ignore") as file:
+                file.write(daily_log)
+            print(daily_log.strip())
 
 def run_speed_test():
     """Führt einen Speedtest durch und speichert die Ergebnisse"""
     try:
         st = speedtest.Speedtest()
         st.get_best_server()
-        st.config['force_ipv4'] = True  # IPv6 deaktivieren
+        st.config['force_ipv4'] = True
 
-        # Speedtest durchführen
-        download_speed = st.download() / 1_000_000  # in Mbit/s
-        upload_speed = st.upload() / 1_000_000  # in Mbit/s
+        download_speed = st.download() / 1_000_000
+        upload_speed = st.upload() / 1_000_000
         ping = st.results.ping
 
-        # Server-Infos abrufen
         server = st.get_best_server()
         server_name = server["name"]
         server_location = f"{server['country']}, {server['cc']}"
         server_host = server["host"]
 
-        # Paketverlust abrufen
         packet_loss = get_ping_loss()
-
-        # Öffentliche IP & ISP abrufen
         ip_address, isp = get_public_ip()
 
-        # Check Mindestgeschwindigkeit
         status = "✅ OK" if download_speed >= MIN_DOWNLOAD and upload_speed >= MIN_UPLOAD else "⚠ UNTER DER MINDESTGESCHWINDIGKEIT!"
 
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -141,29 +145,23 @@ def run_speed_test():
             f"Ping: {ping:.2f} ms | Paketverlust: {packet_loss}% | {status}\n"
         )
 
-        # Logs speichern
         with open(text_log, "a", encoding="utf-8", errors="ignore") as file:
             file.write(log_entry)
-
         print(f"Speedtest durchgeführt: {log_entry.strip()}")
 
-        # Werte für Durchschnittsberechnung speichern
         hourly_results.append((download_speed, upload_speed, ping, packet_loss))
         daily_results.append((download_speed, upload_speed, ping, packet_loss))
 
-        # Durchschnittswerte einmal pro Stunde speichern
-        if datetime.now().minute == 0:
-            log_averages()
+        log_averages()
 
     except Exception as e:
         print(f"Fehler: {str(e)}")
 
 if __name__ == "__main__":
     print("Starte regelmäßige Speedtests... (Zum Beenden: STRG+C)")
-    
     if not os.path.exists(LOG_DIR):
         os.makedirs(LOG_DIR)
-
     while True:
         run_speed_test()
         time.sleep(INTERVAL)
+
