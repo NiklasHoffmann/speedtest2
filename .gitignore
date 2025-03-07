@@ -1,0 +1,27 @@
+# Verstecke Umgebungsvariablen
+.env
+
+# Verstecke Log-Dateien
+*.log
+SpeedtestLogs/
+
+# Verstecke CSV-Dateien mit Messwerten
+*.csv
+
+# Verstecke Python-Cache-Dateien
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Verstecke virtuelle Umgebung
+.venv/
+venv/
+
+# Verstecke IDE-spezifische Dateien
+.vscode/
+.idea/
+*.swp
+
+# Falls du Jupyter Notebooks verwendest
+.ipynb_checkpoints/
