@@ -1,122 +1,144 @@
 # Speedtest Logger
 
-📡 **Automatisierte Internet-Speedtests mit Logging und Durchschnittsberechnung**
+Speedtest Logger is a small Python utility that runs recurring internet speed tests, records each result to a daily log file, and writes hourly and daily summary lines for later inspection. As a portfolio artifact, the repository shows a focused automation script built around operational monitoring rather than a one-off CLI command.
 
-Dieses Python-Skript führt **automatische Internet-Speedtests** durch und speichert die Ergebnisse in **täglichen Log-Dateien**. Es berechnet außerdem **stündliche und tägliche Durchschnittswerte**, um **langfristige Netzwerkprobleme** zu analysieren.
+## What This Repository Demonstrates
 
----
+- Long-running local automation with scheduled execution inside an infinite polling loop.
+- Combining multiple data sources in one measurement cycle: throughput from `speedtest-cli`, public IP and ISP lookup from `ipinfo.io`, and packet-loss estimation from the system `ping` command.
+- Simple observability design through append-only daily logs, derived hourly and daily averages, and explicit error logging.
+- Basic configuration hygiene via `.env` and `.gitignore` for local paths.
+- Practical threshold checking against expected download and upload contract values.
 
-## 📌 Features
+## Tech Stack
 
-✅ Regelmäßige Speedtests alle 10 Minuten  
-✅ Speicherung der Ergebnisse in `.txt`-Dateien  
-✅ Berechnung des stündlichen und täglichen Durchschnitts  
-✅ Mindestgeschwindigkeit kann definiert werden  
-✅ Paketverlust-Messung für bessere Analyse  
-✅ Versteckte `.env` Datei für den Speicherort (sicher für GitHub)  
-✅ Automatisches Weiterlaufen nach Verbindungsabbrüchen  
+- Python
+- `speedtest-cli`
+- `requests`
+- `python-dotenv`
+- Windows `ping` command for packet-loss parsing
 
----
+## Architecture Overview
 
-## 🚀 Installation & Setup
+The repository is intentionally compact. All runtime behavior lives in [speedtest2.py](speedtest2.py).
 
-### 1️⃣ Python & Bibliotheken installieren
+Core responsibilities:
 
-Falls du Python noch nicht hast, lade es hier herunter und installiere es:  
-[https://www.python.org/downloads/](https://www.python.org/downloads/)
+- Load the log directory from `LOG_DIR` in `.env`, with a fallback path if the variable is missing.
+- Run a speed test every 10 minutes.
+- Enrich each measurement with server metadata, public IP, ISP, ping, and packet-loss information.
+- Append raw measurements to a day-scoped text log.
+- Accumulate in-memory results and emit hourly and daily average lines.
+- Flag runs that fall below hard-coded minimum download and upload targets.
 
-Danach öffne eine Konsole (PowerShell, CMD oder Terminal) und gib Folgendes ein:
+## Why It Is Technically Interesting
 
+This is not a large application, but it does capture a real operational use case: turning intermittent network complaints into a time-series style local evidence trail. The code is opinionated in useful ways, especially around continuous execution, failure tolerance at the loop level, and post-run summarization rather than raw measurement only.
+
+It also shows the tradeoffs of a pragmatic utility script. The implementation is optimized for a local Windows environment, relies on mutable in-memory state for aggregation, and keeps persistence deliberately simple with plain text logs instead of a database or dashboard.
+
+## Local Development
+
+### Prerequisites
+
+- Python 3
+- Internet access for the speed test and ISP lookup
+- A Windows environment if you want packet-loss logging to work as implemented
+
+### Install dependencies
+
+```bash
 pip install speedtest-cli requests python-dotenv
+```
 
-Falls du Linux oder macOS nutzt und `pip` nicht funktioniert:
+### Configure environment
 
-python3 -m pip install speedtest-cli requests python-dotenv
+Use [.env.example](.env.example) as the starting point for a local `.env` file:
 
----
+```env
+LOG_DIR=C:/Users/YourName/Desktop/SpeedtestLogs
+MIN_DOWNLOAD=600
+MIN_UPLOAD=10
+INTERVAL_SECONDS=600
+PING_HOST=8.8.8.8
+PING_COUNT=10
+PING_TIMEOUT_SECONDS=10
+```
 
-### 2️⃣ `.env` Datei erstellen
+The script creates the directory if it does not already exist.
 
-Erstelle eine Datei `.env` im Hauptverzeichnis deines Projekts und füge den Speicherort für die Logs hinzu:
+### Run the script
 
-LOG_DIR=C:/Users/DEIN_NAME/Desktop/SpeedtestLogs
-
-Füge `.env` zur `.gitignore` hinzu, damit sie nicht auf **GitHub** hochgeladen wird:
-
-## Sensible Daten nicht hochladen
-
-.env
-
----
-
-### 3️⃣ Skript starten
-
-Starte das Skript mit:
-
+```bash
 python speedtest2.py
+```
 
-Falls du Linux oder macOS nutzt:
+The process runs continuously until interrupted.
 
-python3 speedtest2.py
+## Configuration
 
-Das Skript wird nun **alle 10 Minuten** einen **Speedtest** durchführen und die Ergebnisse speichern.  
-Zum Beenden drücke **STRG + C**.
+### Environment variables
 
----
+`LOG_DIR`
 
-## 📂 Log-Dateien
+- Required for a meaningful local setup.
+- Controls where daily log files are written.
+- Falls back to `C:/StandardOrdner/Fallback` when unset.
 
-Die Speedtest-Ergebnisse werden in **täglichen Log-Dateien** gespeichert:
+`MIN_DOWNLOAD` and `MIN_UPLOAD`
 
-C:/Users/DEIN_NAME/Desktop/SpeedtestLogs/log_speedtest_YYYY-MM-DD.txt
+- Optional throughput thresholds in Mbit/s.
+- Used to mark measurements that fall below the expected contract baseline.
 
-### 📜 Beispielhafte Log-Datei (`log_speedtest_2025-03-07.txt`)
+`INTERVAL_SECONDS`
 
-2025-03-07 12:48:37 | Server: Frankfurt am Main (Germany, DE) [speedtest1.synlinq.de:8080] | IP: 95.90.21.104 | ISP: Vodafone GmbH | Download: 506.77 Mbit/s | Upload: 28.85 Mbit/s | Ping: 28.94 ms | Paketverlust: 0% | ⚠ UNTER DER MINDESTGESCHWINDIGKEIT!
-2025-03-07 13:00:00 | 📊 STÜNDLICHER DURCHSCHNITT | Download: 510.50 Mbit/s | Upload: 29.10 Mbit/s | Ping: 27.80 ms | Paketverlust: 1.2%
-2025-03-07 23:55:00 | 📈 TÄGLICHER DURCHSCHNITT | Download: 500.90 Mbit/s | Upload: 28.50 Mbit/s | Ping: 28.50 ms | Paketverlust: 2.0%
+- Optional polling interval for recurring test runs.
+- Defaults to 600 seconds.
 
----
+`PING_HOST`, `PING_COUNT`, and `PING_TIMEOUT_SECONDS`
 
-## ⚡ Automatischer Start (Windows)
+- Optional controls for packet-loss measurement.
+- Default to `8.8.8.8`, `10`, and `10`.
 
-Falls du das Skript beim **Windows-Start automatisch ausführen** willst:
+### Hard-coded runtime settings
 
-1. **Windows-Taste + R** → `shell:startup` eingeben.  
-2. Erstelle eine **Verknüpfung** zu `pythonw.exe` und trage den Pfad zum Skript ein:
+These defaults are defined in [speedtest2.py](speedtest2.py) and can be overridden through environment variables.
 
-C:\Pfad\zu\pythonw.exe C:\Pfad\zu\speedtest2.py
+## Logging Behavior
 
-Jetzt wird das Skript **automatisch bei jedem Systemstart ausgeführt**. 🚀
+Each day gets a text log file at:
 
----
+```text
+<LOG_DIR>/log_speedtest_YYYY-MM-DD.txt
+```
 
-## 🛠️ Fehlerbehebung
+Entries include:
 
-Falls `speedtest-cli` nicht funktioniert oder `403 Forbidden` zurückgibt:
+- Timestamp
+- Selected speed test server
+- Public IP and ISP
+- Download speed
+- Upload speed
+- Ping
+- Packet loss
+- Threshold status
 
-pip install --upgrade speedtest-cli
+The script also appends derived summary rows for completed hourly and daily buckets.
 
-Falls das Skript **Fehler bei der Serververbindung hat**, versuche es mit einem anderen Speedtest-Server:
+Example output shape:
 
-st.get_servers([])
-st.get_best_server()
+```text
+2025-03-07 12:48:37 | Server: Frankfurt am Main (Germany, DE) [speedtest1.synlinq.de:8080] | IP: 95.90.21.104 | ISP: Vodafone GmbH | Download: 506.77 Mbit/s | Upload: 28.85 Mbit/s | Ping: 28.94 ms | Packet loss: 0% | BELOW MINIMUM THRESHOLD
+2025-03-07 12:59:59 | HOURLY AVERAGE | Download: 510.50 Mbit/s | Upload: 29.10 Mbit/s | Ping: 27.80 ms | Packet loss: 1.20%
+```
 
-Falls du Probleme mit der UTF-8-Kodierung hast:
+## Operational Notes
 
-with open(text_log, "a", encoding="utf-8", errors="ignore") as file:
-    file.write(log_entry)
+- Packet-loss parsing relies on the local `ping` command and supports common Windows and Unix-style loss output formats.
+- Public IP and ISP metadata are fetched from `https://ipinfo.io/json` on every run.
+- Exceptions during a measurement are printed and appended to the current day's log file; the outer loop continues running.
+- Hourly and daily averages are written only when a period is completed, which avoids mixing the first measurement of a new hour or day into the previous bucket.
 
-Falls du das Skript stoppen möchtest, kannst du einfach **STRG + C** drücken.
+## Repository Scope
 
-Falls du prüfen willst, ob `speedtest-cli` funktioniert, teste es direkt in der Konsole mit:
-
-speedtest
-
----
-
-## 📜 Lizenz
-
-Dieses Projekt steht unter der **MIT-Lizenz** – feel free to use & modify!  
-
-🔥 Viel Erfolg mit deinem Speedtest-Logger! Wenn du Fragen hast, **melde dich einfach!** 🚀💪😎
+This repository is a focused single-script utility, not a packaged Python library or service. There is no test suite, dependency lock file, or deployment pipeline in the current codebase. The value here is in the implementation of a practical monitoring workflow, not in framework breadth.
