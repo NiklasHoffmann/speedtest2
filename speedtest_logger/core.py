@@ -1,4 +1,4 @@
-"""One measurement cycle: server choice, throughput, latency, packet loss, ISP."""
+"""One measurement cycle, measured by the official Ookla client."""
 
 import logging
 import os
@@ -7,24 +7,38 @@ import subprocess
 from dataclasses import dataclass
 from datetime import datetime
 
-import requests
-import speedtest
-
-from speedtest_logger.config import (
-    BROWSER_USER_AGENT,
-    IPINFO_URL,
-    SERVER_API_URL,
-    Settings,
-)
+from speedtest_logger import ookla
+from speedtest_logger.config import Settings
 
 logger = logging.getLogger(__name__)
 
 STATUS_OK = "OK"
 STATUS_BELOW = "BELOW MINIMUM THRESHOLD"
 
+UNKNOWN_LOSS = -1.0
+
 # Without this flag every ping call opens its own console window once the
 # program is packaged with --windowed.
 _CREATE_NO_WINDOW = 0x08000000
+
+# The client reports countries by name, while SERVER_COUNTRIES is written in
+# codes. Only the neighbours worth filtering on are listed; a full country name
+# in SERVER_COUNTRIES works regardless of this table.
+_COUNTRY_CODES = {
+    "AT": "AUSTRIA",
+    "BE": "BELGIUM",
+    "CH": "SWITZERLAND",
+    "CZ": "CZECHIA",
+    "DE": "GERMANY",
+    "DK": "DENMARK",
+    "FR": "FRANCE",
+    "GB": "UNITED KINGDOM",
+    "IT": "ITALY",
+    "LU": "LUXEMBOURG",
+    "NL": "NETHERLANDS",
+    "PL": "POLAND",
+    "US": "UNITED STATES",
+}
 
 
 @dataclass(frozen=True)
@@ -33,16 +47,18 @@ class Measurement:
 
     taken_at: datetime
     server_name: str
+    server_location: str
     server_country: str
-    server_cc: str
     server_host: str
-    server_distance_km: float
+    server_id: int | None
     ip_address: str
     isp: str
     download_mbit: float
     upload_mbit: float
     ping_ms: float
-    packet_loss_pct: int
+    jitter_ms: float
+    packet_loss_pct: float
+    result_url: str
     status: str
 
     @property
@@ -51,65 +67,49 @@ class Measurement:
 
 
 class NoServerAvailable(RuntimeError):
-    """Raised when no suitable test server could be determined."""
+    """Raised when no server matches the configured filter."""
 
 
-def fetch_candidate_servers(settings: Settings) -> list[dict]:
-    """Return nearby test servers from the current Ookla endpoint.
+def country_matches(allowed: tuple[str, ...], country: str) -> bool:
+    if not allowed:
+        return True
 
-    speedtest-cli still reads the legacy XML server lists, which today return a
-    rotating handful of servers thousands of kilometres away. Measuring against
-    those describes the route, not the line, so candidates are fetched here and
-    handed to get_best_server() explicitly.
+    name = country.strip().upper()
+    return any(token == name or _COUNTRY_CODES.get(token) == name for token in allowed)
+
+
+def select_server_id(settings: Settings) -> int | None:
+    """Return the server to measure against, or None to let the client decide.
+
+    A pinned SERVER_ID is the strongest option for a comparable series, because
+    it holds the server constant and leaves the line as the only variable.
     """
-    response = requests.get(
-        SERVER_API_URL,
-        params={"engine": "js", "limit": settings.server_list_limit},
-        headers={
-            "User-Agent": BROWSER_USER_AGENT,
-            "Referer": "https://www.speedtest.net/",
-            "Accept": "application/json",
-        },
-        timeout=10,
-    )
-    response.raise_for_status()
-    payload = response.json()
+    if settings.server_id is not None:
+        return settings.server_id
 
-    if not isinstance(payload, list):
-        raise NoServerAvailable("Unexpected server list format from speedtest.net.")
+    if not settings.server_countries:
+        return None
 
-    candidates = []
-    for entry in payload:
-        if not isinstance(entry, dict) or not entry.get("url"):
-            continue
+    servers = ookla.list_servers(settings)
+    matching = [
+        server
+        for server in servers
+        if country_matches(settings.server_countries, str(server.get("country", "")))
+    ]
 
-        country_code = str(entry.get("cc", "")).upper()
-        if settings.server_countries and country_code not in settings.server_countries:
-            continue
+    if not matching:
+        raise NoServerAvailable(
+            "No server matched SERVER_COUNTRIES="
+            f"{settings.allowed_countries_label} among {len(servers)} offered."
+        )
 
-        server = dict(entry)
-        server["cc"] = country_code
-        try:
-            server["d"] = float(entry.get("distance", 0))
-        except (TypeError, ValueError):
-            server["d"] = 0.0
-        candidates.append(server)
-
-    candidates.sort(key=lambda server: server["d"])
-    return candidates
-
-
-def get_public_ip() -> tuple[str, str]:
     try:
-        response = requests.get(IPINFO_URL, timeout=5)
-        response.raise_for_status()
-        data = response.json()
-        return data.get("ip", "Unknown"), data.get("org", "Unknown")
-    except requests.RequestException:
-        return "Unavailable", "Unavailable"
+        return int(matching[0]["id"])
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
-def extract_packet_loss(output: str) -> int:
+def extract_packet_loss(output: str) -> float:
     patterns = [
         r"\((\d+)%\s*(?:loss|verlust)\)",
         r"(\d+(?:\.\d+)?)%\s*packet loss",
@@ -117,11 +117,15 @@ def extract_packet_loss(output: str) -> int:
     for pattern in patterns:
         match = re.search(pattern, output, flags=re.IGNORECASE)
         if match:
-            return int(round(float(match.group(1))))
-    return -1
+            return float(match.group(1))
+    return UNKNOWN_LOSS
 
 
-def get_ping_loss(settings: Settings) -> int:
+def get_ping_loss(settings: Settings) -> float:
+    """Estimate packet loss with the system ping.
+
+    Only used when the chosen server does not report packet loss itself.
+    """
     ping_flag = "-n" if os.name == "nt" else "-c"
     try:
         result = subprocess.run(
@@ -134,7 +138,7 @@ def get_ping_loss(settings: Settings) -> int:
             creationflags=_CREATE_NO_WINDOW if os.name == "nt" else 0,
         )
     except (OSError, subprocess.SubprocessError):
-        return -1
+        return UNKNOWN_LOSS
 
     return extract_packet_loss(f"{result.stdout}\n{result.stderr}")
 
@@ -145,37 +149,64 @@ def get_status(settings: Settings, download_mbit: float, upload_mbit: float) -> 
     return STATUS_BELOW
 
 
+def _bandwidth_mbit(section: object) -> float:
+    """Convert the bandwidth field, which the client reports in bytes per second."""
+    if not isinstance(section, dict):
+        return 0.0
+    try:
+        return float(section.get("bandwidth", 0)) * 8 / 1_000_000
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _number(section: object, key: str, default: float = 0.0) -> float:
+    if not isinstance(section, dict):
+        return default
+    try:
+        return float(section.get(key, default))
+    except (TypeError, ValueError):
+        return default
+
+
 def measure(settings: Settings) -> Measurement:
     """Run one full measurement cycle. Raises on failure; never returns partials."""
     taken_at = datetime.now()
 
-    client = speedtest.Speedtest()
-    candidates = fetch_candidate_servers(settings)
-    if not candidates:
-        raise NoServerAvailable(
-            "No speedtest server available for SERVER_COUNTRIES="
-            f"{settings.allowed_countries_label}."
-        )
+    payload = ookla.measure(settings, server_id=select_server_id(settings))
 
-    server = client.get_best_server(servers=candidates)
-    logger.debug("Selected server %s (%.0f km)", server.get("host"), server.get("d", 0.0))
+    download_mbit = _bandwidth_mbit(payload.get("download"))
+    upload_mbit = _bandwidth_mbit(payload.get("upload"))
 
-    download_mbit = client.download() / 1_000_000
-    upload_mbit = client.upload() / 1_000_000
-    ip_address, isp = get_public_ip()
+    raw_loss = payload.get("packetLoss")
+    if isinstance(raw_loss, (int, float)):
+        packet_loss = float(raw_loss)
+    else:
+        # Not every server reports it, so fall back to the ping estimate.
+        packet_loss = get_ping_loss(settings)
+
+    server = payload.get("server") if isinstance(payload.get("server"), dict) else {}
+    interface = payload.get("interface") if isinstance(payload.get("interface"), dict) else {}
+    result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+
+    try:
+        server_id = int(server.get("id")) if server.get("id") is not None else None
+    except (TypeError, ValueError):
+        server_id = None
 
     return Measurement(
         taken_at=taken_at,
         server_name=str(server.get("name", "Unknown")),
+        server_location=str(server.get("location", "Unknown")),
         server_country=str(server.get("country", "Unknown")),
-        server_cc=str(server.get("cc", "??")),
         server_host=str(server.get("host", "Unknown")),
-        server_distance_km=float(server.get("d", 0.0)),
-        ip_address=ip_address,
-        isp=isp,
+        server_id=server_id,
+        ip_address=str(interface.get("externalIp", "Unavailable")),
+        isp=str(payload.get("isp", "Unavailable")),
         download_mbit=download_mbit,
         upload_mbit=upload_mbit,
-        ping_ms=float(client.results.ping),
-        packet_loss_pct=get_ping_loss(settings),
+        ping_ms=_number(payload.get("ping"), "latency"),
+        jitter_ms=_number(payload.get("ping"), "jitter"),
+        packet_loss_pct=packet_loss,
+        result_url=str(result.get("url", "")),
         status=get_status(settings, download_mbit, upload_mbit),
     )

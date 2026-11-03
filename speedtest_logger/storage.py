@@ -42,16 +42,26 @@ def append_log_entry(settings: Settings, message: str, log_date: date | None = N
 
 
 def format_measurement(measurement: Measurement) -> str:
+    server_id = f", id {measurement.server_id}" if measurement.server_id else ""
+    loss = (
+        "n/a"
+        if measurement.packet_loss_pct < 0
+        else f"{measurement.packet_loss_pct:.2f}%"
+    )
+    result = f"Result: {measurement.result_url} | " if measurement.result_url else ""
+
     return (
         f"{measurement.taken_at:%Y-%m-%d %H:%M:%S} | "
         f"Server: {measurement.server_name} "
-        f"({measurement.server_country}, {measurement.server_cc}) "
-        f"[{measurement.server_host}, {measurement.server_distance_km:.0f} km] | "
+        f"({measurement.server_location}, {measurement.server_country}) "
+        f"[{measurement.server_host}{server_id}] | "
         f"IP: {measurement.ip_address} | ISP: {measurement.isp} | "
         f"Download: {measurement.download_mbit:.2f} Mbit/s | "
         f"Upload: {measurement.upload_mbit:.2f} Mbit/s | "
         f"Ping: {measurement.ping_ms:.2f} ms | "
-        f"Packet loss: {measurement.packet_loss_pct}% | {measurement.status}"
+        f"Jitter: {measurement.jitter_ms:.2f} ms | "
+        f"Packet loss: {loss} | "
+        f"{result}{measurement.status}"
     )
 
 
@@ -110,7 +120,9 @@ def format_average_entry(
     download = summarise([row[0] for row in rows])
     upload = summarise([row[1] for row in rows])
     ping = summarise([row[2] for row in rows])
-    loss = summarise([row[3] for row in rows])
+    # A server that does not report packet loss contributes nothing rather than
+    # dragging the average towards the sentinel value.
+    loss = summarise([row[3] for row in rows if len(row) > 3 and row[3] >= 0])
 
     return (
         f"{timestamp:%Y-%m-%d %H:%M:%S} | {label} | n={download.count} | "
@@ -119,7 +131,11 @@ def format_average_entry(
         f"Upload: avg {upload.mean:.2f}, median {upload.median:.2f}, "
         f"p05 {upload.p05:.2f} Mbit/s | "
         f"Ping: avg {ping.mean:.2f}, median {ping.median:.2f} ms | "
-        f"Packet loss: avg {loss.mean:.2f}, max {loss.maximum:.2f}%"
+        + (
+            f"Packet loss: avg {loss.mean:.2f}, max {loss.maximum:.2f}%"
+            if loss.count
+            else "Packet loss: n/a"
+        )
     )
 
 
@@ -290,6 +306,8 @@ class LogEntry:
     sample_count: int | None = None
     download_median: float | None = None
     download_p05: float | None = None
+    jitter_ms: float | None = None
+    result_url: str = ""
 
 
 _TIMESTAMP = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
@@ -302,6 +320,8 @@ _NUMBERS = {
     "ping_ms": re.compile(r"Ping:\s*(?:avg\s+)?(-?[\d.]+)"),
     "packet_loss_pct": re.compile(r"Packet loss:\s*(?:avg\s+)?(-?[\d.]+)"),
 }
+_JITTER = re.compile(r"Jitter:\s*(-?[\d.]+)")
+_RESULT_URL = re.compile(r"Result:\s*(\S+)")
 _MEDIAN = re.compile(r"Download:[^|]*median\s+(-?[\d.]+)")
 _P05 = re.compile(r"Download:[^|]*p05\s+(-?[\d.]+)")
 _SAMPLE_COUNT = re.compile(r"\|\s*n=(\d+)\s*\|")
@@ -366,6 +386,8 @@ def parse_log_line(line: str) -> LogEntry | None:
         sample_count=int(count_match.group(1)) if count_match else None,
         download_median=optional_float(_MEDIAN),
         download_p05=optional_float(_P05),
+        jitter_ms=optional_float(_JITTER),
+        result_url=url_match.group(1) if (url_match := _RESULT_URL.search(text)) else "",
     )
 
 
