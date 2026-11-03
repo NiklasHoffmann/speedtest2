@@ -369,10 +369,10 @@ class App:
                 )
             elif entry.kind == "average":
                 short = "Stunde" if entry.label.startswith("HOURLY") else "Tag"
-                line = (
-                    f"{stamp}  {short}:  {entry.download_mbit or 0:7.2f} / "
-                    f"{entry.upload_mbit or 0:6.2f}"
-                )
+                median = entry.download_median
+                extra = f"   Median {median:7.2f}" if median is not None else ""
+                count = f"  n={entry.sample_count}" if entry.sample_count else ""
+                line = f"{stamp}  {short}:  {entry.download_mbit or 0:7.2f}{extra}{count}"
             else:
                 line = f"{stamp}  Fehler"
             self.history.insert("end", line)

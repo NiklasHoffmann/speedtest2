@@ -9,7 +9,7 @@ The purpose it is built for is evidence. Turning "the line feels slow" into a ti
 - Separating a long-running measurement process from its user interface, with a plain append-only log file as the single source of truth between them.
 - Working around a decayed upstream dependency: `speedtest-cli` still reads Ookla's legacy XML server lists, which now return a rotating handful of servers thousands of kilometres away, so candidate servers are fetched from the current JSON endpoint and passed to the library explicitly.
 - Cross-process mutual exclusion through a lock file, because two overlapping measurements both saturate the line and both record a wrong number.
-- Aggregation state that survives a restart, so hourly and daily averages are not lost when the machine reboots.
+- Aggregation state that survives a restart, so hourly and daily summaries are not lost when the machine reboots, and summary lines that report median and 5th percentile alongside the mean because a mean alone does not survive being argued with.
 - Combining multiple data sources in one measurement cycle: throughput from `speedtest-cli`, public IP and ISP lookup from `ipinfo.io`, and packet-loss estimation from the system `ping` command.
 - Packaging a Python project as standalone Windows executables, including the details that only bite once there is no console: suppressed child-process windows and diagnostics through `logging` instead of `print`.
 
@@ -213,10 +213,23 @@ Measurement entries include the timestamp, the selected server with its distance
 
 ```text
 2025-03-07 12:48:37 | Server: Frankfurt am Main (Germany, DE) [speedtest1.synlinq.de:8080, 48 km] | IP: 95.90.21.104 | ISP: Vodafone GmbH | Download: 506.77 Mbit/s | Upload: 28.85 Mbit/s | Ping: 28.94 ms | Packet loss: 0% | BELOW MINIMUM THRESHOLD
-2025-03-07 12:59:59 | HOURLY AVERAGE | Download: 510.50 Mbit/s | Upload: 29.10 Mbit/s | Ping: 27.80 ms | Packet loss: 1.20%
+2025-03-07 12:59:59 | HOURLY AVERAGE | n=6 | Download: avg 510.50, median 518.40, p05 402.10 Mbit/s | Upload: avg 29.10, median 29.40, p05 26.80 Mbit/s | Ping: avg 27.80, median 27.50 ms | Packet loss: avg 1.20, max 4.00%
 ```
 
 Averages are written when a period closes, which keeps the first measurement of a new hour out of the previous bucket. Because the buckets live in `aggregation-state.json` rather than in memory, two cases that used to lose data now work: a restart keeps the running hour, and a bucket left open by a previous run is summarised at the next start instead of being silently dropped.
+
+### Why the summary lines carry more than a mean
+
+A mean on its own is the weakest number in the file. One bad measurement drags it down and one good one props it up, and whoever is on the other side of the argument knows that. Seven measurements taken during development make the point:
+
+```text
+78.80   290.10   420.04   501.28   517.31   540.45   574.65   Mbit/s
+mean 417.52        median 501.28        p05 142.19
+```
+
+The single outlier pulls the mean 84 Mbit/s below the median. The median says what the connection usually does, the 5th percentile says how bad its bad moments are, and `n` says how much weight the period can carry at all. With few samples in a period the 5th percentile converges on the minimum; that is the honest answer for that sample size rather than a defect.
+
+Log files written before the summary lines gained these columns still parse: the `avg` keyword is optional in the parser, and `median`, `p05` and `n` come back as absent rather than zero.
 
 ## Operational Notes
 

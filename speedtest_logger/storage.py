@@ -2,8 +2,10 @@
 
 import json
 import logging
+import math
 import os
 import re
+import statistics
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, time as dt_time, timedelta
@@ -53,34 +55,76 @@ def format_measurement(measurement: Measurement) -> str:
     )
 
 
+@dataclass(frozen=True)
+class Stats:
+    """Distribution of one metric over a period."""
+
+    count: int
+    mean: float
+    median: float
+    p05: float
+    maximum: float
+
+
+def percentile(values: Sequence[float], fraction: float) -> float:
+    """Linear-interpolated percentile, matching the common numpy default."""
+    if not values:
+        return 0.0
+
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+
+    position = fraction * (len(ordered) - 1)
+    lower = math.floor(position)
+    upper = min(lower + 1, len(ordered) - 1)
+    weight = position - lower
+    return ordered[lower] * (1 - weight) + ordered[upper] * weight
+
+
+def summarise(values: Sequence[float]) -> Stats:
+    if not values:
+        return Stats(0, 0.0, 0.0, 0.0, 0.0)
+
+    return Stats(
+        count=len(values),
+        mean=sum(values) / len(values),
+        median=statistics.median(values),
+        p05=percentile(values, 0.05),
+        maximum=max(values),
+    )
+
+
 def format_average_entry(
-    timestamp: datetime, label: str, averages: tuple[float, float, float, float]
+    timestamp: datetime, label: str, rows: Sequence[Sequence[float]]
 ) -> str:
-    avg_download, avg_upload, avg_ping, avg_loss = averages
+    """Summarise a period.
+
+    The mean alone is easy to attack, because a single bad measurement drags it
+    down and a single good one props it up. The median says what the connection
+    usually does and the 5th percentile says how bad its bad moments are, which
+    is the pair that actually carries an argument. With few samples in a period
+    the 5th percentile converges on the minimum, which is the honest answer
+    rather than a defect.
+    """
+    download = summarise([row[0] for row in rows])
+    upload = summarise([row[1] for row in rows])
+    ping = summarise([row[2] for row in rows])
+    loss = summarise([row[3] for row in rows])
+
     return (
-        f"{timestamp:%Y-%m-%d %H:%M:%S} | {label} | "
-        f"Download: {avg_download:.2f} Mbit/s | Upload: {avg_upload:.2f} Mbit/s | "
-        f"Ping: {avg_ping:.2f} ms | Packet loss: {avg_loss:.2f}%"
+        f"{timestamp:%Y-%m-%d %H:%M:%S} | {label} | n={download.count} | "
+        f"Download: avg {download.mean:.2f}, median {download.median:.2f}, "
+        f"p05 {download.p05:.2f} Mbit/s | "
+        f"Upload: avg {upload.mean:.2f}, median {upload.median:.2f}, "
+        f"p05 {upload.p05:.2f} Mbit/s | "
+        f"Ping: avg {ping.mean:.2f}, median {ping.median:.2f} ms | "
+        f"Packet loss: avg {loss.mean:.2f}, max {loss.maximum:.2f}%"
     )
 
 
 def format_error(moment: datetime, message: str) -> str:
     return f"{moment:%Y-%m-%d %H:%M:%S} | ERROR | {message}"
-
-
-def calculate_average(
-    results: Sequence[Sequence[float]],
-) -> tuple[float, float, float, float]:
-    if not results:
-        return 0.0, 0.0, 0.0, 0.0
-
-    count = len(results)
-    return (
-        sum(row[0] for row in results) / count,
-        sum(row[1] for row in results) / count,
-        sum(row[2] for row in results) / count,
-        sum(row[3] for row in results) / count,
-    )
 
 
 class LockBusy(RuntimeError):
@@ -194,18 +238,14 @@ class Aggregator:
 
         if self._hour_bucket is not None and self._hour_bucket != hour_bucket and self._hourly:
             summary_time = self._hour_bucket + timedelta(hours=1) - timedelta(seconds=1)
-            entry = format_average_entry(
-                summary_time, HOURLY_LABEL, calculate_average(self._hourly)
-            )
+            entry = format_average_entry(summary_time, HOURLY_LABEL, self._hourly)
             append_log_entry(self._settings, entry, log_date=self._hour_bucket.date())
             written.append(entry)
             self._hourly = []
 
         if self._day_bucket is not None and self._day_bucket != day_bucket and self._daily:
             summary_time = datetime.combine(self._day_bucket, dt_time(23, 59, 59))
-            entry = format_average_entry(
-                summary_time, DAILY_LABEL, calculate_average(self._daily)
-            )
+            entry = format_average_entry(summary_time, DAILY_LABEL, self._daily)
             append_log_entry(self._settings, entry, log_date=self._day_bucket)
             written.append(entry)
             self._daily = []
@@ -247,16 +287,24 @@ class LogEntry:
     ping_ms: float | None
     packet_loss_pct: float | None
     status: str
+    sample_count: int | None = None
+    download_median: float | None = None
+    download_p05: float | None = None
 
 
 _TIMESTAMP = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
 _SERVER = re.compile(r"Server:\s*(.+?)\s*\|")
+# "avg " is optional so that log files written before the summary lines gained
+# median and percentile columns still parse.
 _NUMBERS = {
-    "download_mbit": re.compile(r"Download:\s*(-?[\d.]+)"),
-    "upload_mbit": re.compile(r"Upload:\s*(-?[\d.]+)"),
-    "ping_ms": re.compile(r"Ping:\s*(-?[\d.]+)"),
-    "packet_loss_pct": re.compile(r"Packet loss:\s*(-?[\d.]+)"),
+    "download_mbit": re.compile(r"Download:\s*(?:avg\s+)?(-?[\d.]+)"),
+    "upload_mbit": re.compile(r"Upload:\s*(?:avg\s+)?(-?[\d.]+)"),
+    "ping_ms": re.compile(r"Ping:\s*(?:avg\s+)?(-?[\d.]+)"),
+    "packet_loss_pct": re.compile(r"Packet loss:\s*(?:avg\s+)?(-?[\d.]+)"),
 }
+_MEDIAN = re.compile(r"Download:[^|]*median\s+(-?[\d.]+)")
+_P05 = re.compile(r"Download:[^|]*p05\s+(-?[\d.]+)")
+_SAMPLE_COUNT = re.compile(r"\|\s*n=(\d+)\s*\|")
 
 
 def parse_log_line(line: str) -> LogEntry | None:
@@ -295,6 +343,15 @@ def parse_log_line(line: str) -> LogEntry | None:
     server_match = _SERVER.search(text)
     status = text.rsplit("|", 1)[-1].strip() if kind == "measurement" else ""
 
+    def optional_float(pattern: re.Pattern[str]) -> float | None:
+        match = pattern.search(text)
+        try:
+            return float(match.group(1)) if match else None
+        except ValueError:
+            return None
+
+    count_match = _SAMPLE_COUNT.search(text)
+
     return LogEntry(
         raw=text,
         taken_at=taken_at,
@@ -306,6 +363,9 @@ def parse_log_line(line: str) -> LogEntry | None:
         ping_ms=values["ping_ms"],
         packet_loss_pct=values["packet_loss_pct"],
         status=status,
+        sample_count=int(count_match.group(1)) if count_match else None,
+        download_median=optional_float(_MEDIAN),
+        download_p05=optional_float(_P05),
     )
 
 
