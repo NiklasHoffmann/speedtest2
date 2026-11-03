@@ -25,3 +25,7 @@ venv/
 
 # Falls du Jupyter Notebooks verwendest
 .ipynb_checkpoints/
+
+# Verstecke PyInstaller-Artefakte
+build/
+dist/
