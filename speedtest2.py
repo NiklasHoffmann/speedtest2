@@ -38,6 +38,17 @@ PING_HOST = os.getenv("PING_HOST", "8.8.8.8").strip() or "8.8.8.8"
 PING_COUNT = get_env_int("PING_COUNT", 10, minimum=1)
 PING_TIMEOUT = get_env_int("PING_TIMEOUT_SECONDS", 10, minimum=1)
 IPINFO_URL = "https://ipinfo.io/json"
+SERVER_API_URL = "https://www.speedtest.net/api/js/servers"
+BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+SERVER_LIST_LIMIT = get_env_int("SERVER_LIST_LIMIT", 10, minimum=1)
+SERVER_COUNTRIES = [
+    code.strip().upper()
+    for code in os.getenv("SERVER_COUNTRIES", "DE").split(",")
+    if code.strip()
+]
 
 hourly_results = []
 daily_results = []
@@ -78,6 +89,51 @@ def get_public_ip():
         return data.get("ip", "Unknown"), data.get("org", "Unknown")
     except requests.RequestException:
         return "Unavailable", "Unavailable"
+
+
+def fetch_candidate_servers():
+    """Return nearby speedtest servers from the current Ookla endpoint.
+
+    speedtest-cli still reads the legacy XML server lists, which today return a
+    rotating handful of servers thousands of kilometres away. Measuring against
+    those describes the route, not the line, so candidates are fetched here and
+    handed to get_best_server() explicitly.
+    """
+    response = requests.get(
+        SERVER_API_URL,
+        params={"engine": "js", "limit": SERVER_LIST_LIMIT},
+        headers={
+            "User-Agent": BROWSER_USER_AGENT,
+            "Referer": "https://www.speedtest.net/",
+            "Accept": "application/json",
+        },
+        timeout=10,
+    )
+    response.raise_for_status()
+    payload = response.json()
+
+    if not isinstance(payload, list):
+        raise RuntimeError("Unexpected server list format from speedtest.net.")
+
+    candidates = []
+    for entry in payload:
+        if not isinstance(entry, dict) or not entry.get("url"):
+            continue
+
+        country_code = str(entry.get("cc", "")).upper()
+        if SERVER_COUNTRIES and country_code not in SERVER_COUNTRIES:
+            continue
+
+        server = dict(entry)
+        server["cc"] = country_code
+        try:
+            server["d"] = float(entry.get("distance", 0))
+        except (TypeError, ValueError):
+            server["d"] = 0.0
+        candidates.append(server)
+
+    candidates.sort(key=lambda server: server["d"])
+    return candidates
 
 
 def extract_packet_loss(output):
@@ -164,8 +220,16 @@ def run_speed_test():
 
     try:
         st = speedtest.Speedtest()
-        st.config["force_ipv4"] = True
-        server = st.get_best_server()
+        candidates = fetch_candidate_servers()
+        if not candidates:
+            allowed = ",".join(SERVER_COUNTRIES) or "any"
+            raise RuntimeError(
+                f"No speedtest server available for SERVER_COUNTRIES={allowed}. "
+                "Skipping this measurement rather than logging a result from an "
+                "unsuitable server."
+            )
+
+        server = st.get_best_server(servers=candidates)
 
         download_speed = st.download() / 1_000_000
         upload_speed = st.upload() / 1_000_000
@@ -179,7 +243,8 @@ def run_speed_test():
 
         log_entry = (
             f"{measurement_time:%Y-%m-%d %H:%M:%S} | "
-            f"Server: {server['name']} ({server['country']}, {server['cc']}) [{server['host']}] | "
+            f"Server: {server['name']} ({server['country']}, {server['cc']}) "
+            f"[{server['host']}, {server['d']:.0f} km] | "
             f"IP: {ip_address} | ISP: {isp} | "
             f"Download: {download_speed:.2f} Mbit/s | Upload: {upload_speed:.2f} Mbit/s | "
             f"Ping: {ping:.2f} ms | Packet loss: {packet_loss}% | {status}"

@@ -5,6 +5,7 @@ Speedtest Logger is a small Python utility that runs recurring internet speed te
 ## What This Repository Demonstrates
 
 - Long-running local automation with scheduled execution inside an infinite polling loop.
+- Working around a decayed upstream dependency: `speedtest-cli` still reads Ookla's legacy XML server lists, which now return a rotating handful of servers thousands of kilometres away, so the candidate servers are fetched from the current JSON endpoint and passed to the library explicitly.
 - Combining multiple data sources in one measurement cycle: throughput from `speedtest-cli`, public IP and ISP lookup from `ipinfo.io`, and packet-loss estimation from the system `ping` command.
 - Simple observability design through append-only daily logs, derived hourly and daily averages, and explicit error logging.
 - Basic configuration hygiene via `.env` and `.gitignore` for local paths.
@@ -25,6 +26,7 @@ The repository is intentionally compact. All runtime behavior lives in [speedtes
 Core responsibilities:
 
 - Load the log directory from `LOG_DIR` in `.env`, with a fallback path if the variable is missing.
+- Fetch nearby test servers from the current speedtest.net JSON endpoint and restrict them to the countries listed in `SERVER_COUNTRIES`.
 - Run a speed test every 10 minutes.
 - Enrich each measurement with server metadata, public IP, ISP, ping, and packet-loss information.
 - Append raw measurements to a day-scoped text log.
@@ -63,6 +65,8 @@ INTERVAL_SECONDS=600
 PING_HOST=8.8.8.8
 PING_COUNT=10
 PING_TIMEOUT_SECONDS=10
+SERVER_COUNTRIES=DE
+SERVER_LIST_LIMIT=10
 ```
 
 The script creates the directory if it does not already exist.
@@ -100,9 +104,33 @@ The process runs continuously until interrupted.
 - Optional controls for packet-loss measurement.
 - Default to `8.8.8.8`, `10`, and `10`.
 
+`SERVER_COUNTRIES`
+
+- Optional comma-separated allowlist of country codes for test server selection.
+- Defaults to `DE`. An empty value disables the filter and accepts any server the endpoint returns.
+
+`SERVER_LIST_LIMIT`
+
+- Optional number of candidate servers requested from the endpoint before filtering.
+- Defaults to `10`. A narrow `SERVER_COUNTRIES` filter may need a higher limit to leave usable candidates.
+
 ### Hard-coded runtime settings
 
 These defaults are defined in [speedtest2.py](speedtest2.py) and can be overridden through environment variables.
+
+## Server Selection
+
+`speedtest-cli` 2.1.3 resolves servers through Ookla's legacy XML endpoints (`speedtest-servers-static.php` and its siblings). Those endpoints are effectively retired: they still answer, but with a rotating remnant of roughly ten servers worldwide. The library's own `get_best_server()` then works correctly on unusable input and picks, for example, a server in Uzbekistan for a client in Germany. The resulting numbers describe the route to Central Asia, not the local line.
+
+To avoid that, [speedtest2.py](speedtest2.py) fetches candidates from the current JSON endpoint instead:
+
+```text
+https://www.speedtest.net/api/js/servers?engine=js&limit=<SERVER_LIST_LIMIT>
+```
+
+The request needs a browser `User-Agent` and a `Referer: https://www.speedtest.net/` header; without them the endpoint answers `403`. Results are filtered to `SERVER_COUNTRIES`, sorted by distance, and handed to `get_best_server(servers=...)`, which skips the legacy list entirely. The selected server's distance is recorded in each log line so an implausible pick is visible in the log itself.
+
+If the endpoint fails or no server matches the filter, the measurement is skipped and an `ERROR` line is logged instead. A visible gap is preferable to a plausible-looking but route-limited number in a log intended as evidence.
 
 ## Logging Behavior
 
@@ -115,7 +143,7 @@ Each day gets a text log file at:
 Entries include:
 
 - Timestamp
-- Selected speed test server
+- Selected speed test server and its distance
 - Public IP and ISP
 - Download speed
 - Upload speed
@@ -128,7 +156,7 @@ The script also appends derived summary rows for completed hourly and daily buck
 Example output shape:
 
 ```text
-2025-03-07 12:48:37 | Server: Frankfurt am Main (Germany, DE) [speedtest1.synlinq.de:8080] | IP: 95.90.21.104 | ISP: Vodafone GmbH | Download: 506.77 Mbit/s | Upload: 28.85 Mbit/s | Ping: 28.94 ms | Packet loss: 0% | BELOW MINIMUM THRESHOLD
+2025-03-07 12:48:37 | Server: Frankfurt am Main (Germany, DE) [speedtest1.synlinq.de:8080, 48 km] | IP: 95.90.21.104 | ISP: Vodafone GmbH | Download: 506.77 Mbit/s | Upload: 28.85 Mbit/s | Ping: 28.94 ms | Packet loss: 0% | BELOW MINIMUM THRESHOLD
 2025-03-07 12:59:59 | HOURLY AVERAGE | Download: 510.50 Mbit/s | Upload: 29.10 Mbit/s | Ping: 27.80 ms | Packet loss: 1.20%
 ```
 
@@ -136,6 +164,7 @@ Example output shape:
 
 - Packet-loss parsing relies on the local `ping` command and supports common Windows and Unix-style loss output formats.
 - Public IP and ISP metadata are fetched from `https://ipinfo.io/json` on every run.
+- The candidate server list is fetched on every run, so a changing location or a server going offline is picked up without a restart.
 - Exceptions during a measurement are printed and appended to the current day's log file; the outer loop continues running.
 - Hourly and daily averages are written only when a period is completed, which avoids mixing the first measurement of a new hour or day into the previous bucket.
 
