@@ -29,3 +29,7 @@ venv/
 # Verstecke PyInstaller-Artefakte
 build/
 dist/
+
+# Verstecke die fremde Ookla-Binaerdatei, nur das Hol-Skript bleibt im Repo
+tools/*
+!tools/fetch-ookla.py

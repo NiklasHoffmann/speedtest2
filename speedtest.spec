@@ -6,6 +6,10 @@ Produces two single-file executables in dist/:
   speedtest.exe         the desktop window, no console
   speedtest-logger.exe  the background logger, no console either
 
+The measurement engine is the official Ookla client, which is NOT bundled: it
+stays a separate binary so that it is not redistributed. Place it in a tools
+directory next to the executables, or point OOKLA_CLI_PATH at it.
+
 Both are console-less. That is why subprocess calls in speedtest_logger pass
 CREATE_NO_WINDOW and why diagnostics go through logging instead of print.
 
@@ -16,9 +20,7 @@ COMMON = {
     "pathex": ["."],
     "binaries": [],
     "datas": [],
-    # speedtest-cli is a single top-level module imported dynamically nowhere,
-    # but listing it keeps the dependency explicit if the import ever moves.
-    "hiddenimports": ["speedtest"],
+    "hiddenimports": [],
     "hookspath": [],
     "hooksconfig": {},
     "runtime_hooks": [],

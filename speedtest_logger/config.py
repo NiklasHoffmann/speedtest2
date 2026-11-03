@@ -16,12 +16,6 @@ import dotenv
 logger = logging.getLogger(__name__)
 
 DEFAULT_LOG_DIR = "C:/StandardOrdner/Fallback"
-IPINFO_URL = "https://ipinfo.io/json"
-SERVER_API_URL = "https://www.speedtest.net/api/js/servers"
-BROWSER_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-)
 
 
 def base_dir() -> Path:
@@ -48,7 +42,9 @@ class Settings:
     ping_count: int
     ping_timeout: int
     server_countries: tuple[str, ...]
-    server_list_limit: int
+    server_id: int | None
+    ookla_cli_path: Path | None
+    measurement_timeout: int
 
     @property
     def allowed_countries_label(self) -> str:
@@ -71,6 +67,32 @@ def _env_int(name: str, default: int, minimum: int = 0) -> int:
         return default
 
     return value
+
+
+def _env_optional_int(name: str, minimum: int = 0) -> int | None:
+    """Read an optional integer. Absent and invalid both mean not set."""
+    raw_value = os.getenv(name)
+    if raw_value is None or raw_value.strip() == "":
+        return None
+
+    try:
+        value = int(raw_value)
+    except ValueError:
+        logger.warning("Invalid value for %s: %r. Ignoring it.", name, raw_value)
+        return None
+
+    if value < minimum:
+        logger.warning("Value for %s must be >= %s. Ignoring it.", name, minimum)
+        return None
+
+    return value
+
+
+def _env_optional_path(name: str) -> Path | None:
+    raw_value = os.getenv(name)
+    if raw_value is None or raw_value.strip() == "":
+        return None
+    return Path(raw_value.strip()).expanduser()
 
 
 def configure_logging(settings: Settings, console: bool = True) -> None:
@@ -135,5 +157,7 @@ def load_settings() -> Settings:
             for code in os.getenv("SERVER_COUNTRIES", "DE").split(",")
             if code.strip()
         ),
-        server_list_limit=_env_int("SERVER_LIST_LIMIT", 10, minimum=1),
+        server_id=_env_optional_int("SERVER_ID", minimum=1),
+        ookla_cli_path=_env_optional_path("OOKLA_CLI_PATH"),
+        measurement_timeout=_env_int("MEASUREMENT_TIMEOUT_SECONDS", 180, minimum=30),
     )

@@ -1,6 +1,4 @@
 # Runtime dependencies.
-# speedtest-cli is pinned because the server selection in speedtest_logger/core.py
-# depends on get_best_server(servers=...) accepting a pre-built candidate list.
+# The measurement engine is the official Ookla CLI, fetched by
+# tools/fetch-ookla.py rather than installed through pip.
 python-dotenv==1.1.0
-requests==2.32.3
-speedtest-cli==2.1.3
