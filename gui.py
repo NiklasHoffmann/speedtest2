@@ -10,6 +10,7 @@ import os
 import queue
 import sys
 import threading
+import time
 import tkinter as tk
 from datetime import datetime
 from tkinter import font as tkfont, messagebox, ttk
@@ -43,6 +44,9 @@ class App:
         self.settings = settings
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
         self.measuring = False
+        # Each lookup spawns tasklist, so the result is reused within a tick.
+        self._pid_checked_at = 0.0
+        self._pid_cached: int | None = None
 
         self.root = tk.Tk()
         self.root.title("Speedtest Logger")
@@ -235,7 +239,7 @@ class App:
 
     def _toggle_background(self) -> None:
         try:
-            if autostart.background_pid(self.settings) is not None:
+            if self._background_pid() is not None:
                 autostart.stop_background(self.settings)
                 self.status_text.set("Logger gestoppt")
             else:
@@ -244,6 +248,7 @@ class App:
         except autostart.AutostartError as error:
             messagebox.showerror("Hintergrundprozess", str(error))
         finally:
+            self._invalidate_pid_cache()
             self._refresh_control_buttons()
 
     def _open_log_dir(self) -> None:
@@ -253,8 +258,18 @@ class App:
         else:
             messagebox.showinfo("Log-Ordner", str(self.settings.log_dir))
 
+    def _background_pid(self, max_age: float = 3.0) -> int | None:
+        now = time.monotonic()
+        if now - self._pid_checked_at > max_age:
+            self._pid_cached = autostart.background_pid(self.settings)
+            self._pid_checked_at = now
+        return self._pid_cached
+
+    def _invalidate_pid_cache(self) -> None:
+        self._pid_checked_at = 0.0
+
     def _refresh_control_buttons(self) -> None:
-        running = autostart.background_pid(self.settings) is not None
+        running = self._background_pid() is not None
         self.background_button.configure(
             text="Logger stoppen" if running else "Logger starten"
         )
@@ -327,7 +342,7 @@ class App:
         if latest.taken_at is None:
             return
 
-        running = autostart.background_pid(self.settings) is not None
+        running = self._background_pid() is not None
         age = (datetime.now() - latest.taken_at).total_seconds()
 
         if running and age <= self.settings.interval * 2:
